@@ -148,18 +148,36 @@ app.command('/leaderboard', async ({ command, ack, respond }) => {
   await respond({ response_type: 'ephemeral', text: message });
 });
 
-app.command('/dailysummary', async ({ command, ack, say }) => {
+app.command('/dailysummary', async ({ command, ack, client }) => {
+  // Acknowledge immediately
   await ack();
   
-  await say('📊 Generating daily sales digest...');
+  const channelId = command.channel_id;
   
+  // Post initial message
+  await client.chat.postMessage({
+    token: process.env.SLACK_BOT_TOKEN,
+    channel: channelId,
+    text: '📊 Generating daily sales digest...'
+  });
+  
+  // Generate digest asynchronously (can take time)
   try {
     const digest = await generateDailyDigest(owners, true);
     const message = formatDigestMessage(digest);
-    await say(message);
+    
+    await client.chat.postMessage({
+      token: process.env.SLACK_BOT_TOKEN,
+      channel: channelId,
+      text: message
+    });
   } catch (error) {
     console.error('Error generating digest:', error);
-    await say('Sorry, there was an error generating the daily summary. Check the logs.');
+    await client.chat.postMessage({
+      token: process.env.SLACK_BOT_TOKEN,
+      channel: channelId,
+      text: 'Sorry, there was an error generating the daily summary. Check the logs.'
+    });
   }
 });
 
