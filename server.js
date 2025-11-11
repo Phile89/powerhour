@@ -1,6 +1,8 @@
 require('dotenv').config();
 const { App, ExpressReceiver } = require('@slack/bolt');
 const { getOwners } = require('./owners');
+const cron = require('node-cron');
+const { generateDailyDigest, formatDigestMessage } = require('./digest');
 
 // Create a Bolt Receiver for webhooks and Slack commands
 const receiver = new ExpressReceiver({
@@ -29,7 +31,8 @@ let owners = {};
 
 app.command('/powerhour', async ({ command, ack, say, client }) => {
   await ack();
-  const action = command.text.trim().toLowerCase();
+  const args = command.text.trim().split(' ');
+  const action = args[0].toLowerCase();
   const channelId = command.channel_id;
 
   if (action === 'start') {
@@ -37,6 +40,9 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
       await say("A Power Hour is already running in this channel!");
       return;
     }
+
+    // Parse duration (default 60 minutes)
+    const duration = parseInt(args[1]) || 60;
 
     const today = new Date();
     const dateOptions = { weekday: 'long', month: 'long', day: 'numeric' };
@@ -47,18 +53,29 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
       messageTs: null,
       repStats: {},
       previousLeaderboard: [],
-      interval: null // To hold our 10-minute timer
+      interval: null,
+      inactivityInterval: null,
+      finalPushTimeout: null,
+      startTime: Date.now(),
+      duration: duration, // in minutes
+      teamDemos: 0,
+      teamGoalAnnounced: false
     };
     
     const rules = ">*Scoring Rules:*\n> • *5 points* per Demo Booked\n> • *1 point* per Call (over 2 mins)";
-    const title = `⚡ *POWER HOUR STARTED for ${formattedDate}!* ⚡\nTracking activity in real-time...\n\n${rules}`;
+    const title = `⚡ *POWER HOUR STARTED for ${formattedDate}!* ⚡\n_Running for ${duration} minutes_\nTracking activity in real-time...\n\n${rules}`;
     const leaderboardText = `📊 *LIVE LEADERBOARD*\n> _Waiting for activity..._`;
     const tipText = "💡 Tip: Use `/leaderboard` at any time to see the current standings.";
     const simpleText = `Power Hour Started for ${formattedDate}!`;
 
     const result = await say({
         text: simpleText,
-        blocks: [ { "type": "section", "text": { "type": "mrkdwn", "text": title } }, { "type": "context", "elements": [ { "type": "mrkdwn", "text": tipText } ] }, { "type": "divider" }, { "type": "section", "text": { "type": "mrkdwn", "text": leaderboardText } } ]
+        blocks: [
+          { "type": "section", "text": { "type": "mrkdwn", "text": title } },
+          { "type": "context", "elements": [ { "type": "mrkdwn", "text": tipText } ] },
+          { "type": "divider" },
+          { "type": "section", "text": { "type": "mrkdwn", "text": leaderboardText } }
+        ]
     });
     activeSessions[channelId].messageTs = result.ts;
 
@@ -67,14 +84,29 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
       updateLeaderboard(app.client, channelId);
     }, 600000); // 10 minutes
 
+    // Check for inactivity every 5 minutes
+    activeSessions[channelId].inactivityInterval = setInterval(() => {
+      checkInactivity(channelId);
+    }, 300000); // 5 minutes
+
+    // Schedule final push alert (10 minutes before end)
+    const finalPushTime = (duration - 10) * 60 * 1000; // Convert to milliseconds
+    if (finalPushTime > 0) {
+      activeSessions[channelId].finalPushTimeout = setTimeout(() => {
+        finalPushAlert(channelId);
+      }, finalPushTime);
+    }
+
   } else if (action === 'stop') {
     if (!activeSessions[channelId]) {
       await say("There's no active Power Hour to stop in this channel.");
       return;
     }
     
-    // Stop the 10-minute timer
+    // Clear all intervals and timeouts
     clearInterval(activeSessions[channelId].interval);
+    clearInterval(activeSessions[channelId].inactivityInterval);
+    clearTimeout(activeSessions[channelId].finalPushTimeout);
 
     await say('🏁 *Power Hour Complete!* Generating final results...');
     await updateLeaderboard(client, channelId, true);
@@ -82,7 +114,7 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
     delete activeSessions[channelId];
     
   } else {
-    await say('Usage: `/powerhour start` or `/powerhour stop`');
+    await say('Usage: `/powerhour start [duration in minutes]` or `/powerhour stop`\nExample: `/powerhour start 60` for a 60-minute power hour');
   }
 });
 
@@ -116,6 +148,20 @@ app.command('/leaderboard', async ({ command, ack, respond }) => {
   await respond({ response_type: 'ephemeral', text: message });
 });
 
+app.command('/dailysummary', async ({ command, ack, say }) => {
+  await ack();
+  
+  await say('📊 Generating daily sales digest...');
+  
+  try {
+    const digest = await generateDailyDigest(owners, true);
+    const message = formatDigestMessage(digest);
+    await say(message);
+  } catch (error) {
+    console.error('Error generating digest:', error);
+    await say('Sorry, there was an error generating the daily summary. Check the logs.');
+  }
+});
 
 // --- WEBHOOK HANDLERS ---
 
@@ -164,11 +210,12 @@ async function handleNewDial(call) {
     
     let userStats = session.repStats[userName];
     if (!userStats) {
-      userStats = { calls: 0, demos: 0, dials: 0 };
+      userStats = { calls: 0, demos: 0, dials: 0, lastActivity: Date.now(), activityTimestamps: [] };
       session.repStats[userName] = userStats;
     }
 
     userStats.dials = (userStats.dials || 0) + 1;
+    userStats.lastActivity = Date.now();
     const callAttemptNumber = userStats.dials;
     
     if (callAttemptNumber === 1 || callAttemptNumber % 10 === 0) {
@@ -193,15 +240,25 @@ async function handleNewDemo(deal, ownerId) {
     if (!session) continue;
     
     if (!session.repStats[ownerName]) {
-      session.repStats[ownerName] = { calls: 0, demos: 0, dials: 0 };
+      session.repStats[ownerName] = { calls: 0, demos: 0, dials: 0, lastActivity: Date.now(), activityTimestamps: [] };
     }
     session.repStats[ownerName].demos += 1;
+    session.repStats[ownerName].lastActivity = Date.now();
+    session.repStats[ownerName].activityTimestamps.push({ type: 'demo', time: Date.now() });
+    
+    // Track team demos
+    session.teamDemos += 1;
     
     const gifUrl = await getRandomGif('celebration cheering');
     const messageText = `🔥 *${ownerName}* just booked a demo with *${dealName}*! 🎯`;
     
     await postMessageWithGif(channelId, messageText, gifUrl);
-    // Note: We no longer call updateLeaderboard here
+    
+    // Check for hot streak (2+ demos in 20 minutes)
+    checkHotStreak(channelId, ownerName, 'demo');
+    
+    // Check for team goal
+    checkTeamGoal(channelId);
   }
 }
 
@@ -215,13 +272,108 @@ async function handleNewCall(call) {
     if (!session) continue;
      
     if (!session.repStats[userName]) {
-      session.repStats[userName] = { calls: 0, demos: 0, dials: 0 };
+      session.repStats[userName] = { calls: 0, demos: 0, dials: 0, lastActivity: Date.now(), activityTimestamps: [] };
     }
     session.repStats[userName].calls += 1;
+    session.repStats[userName].lastActivity = Date.now();
+    session.repStats[userName].activityTimestamps.push({ type: 'call', time: Date.now() });
     
     await postMessage(channelId, `📞 *${userName}* just completed a ${duration} min call with *${contactName}*!`);
-    // Note: We no longer call updateLeaderboard here
+    
+    // Check for hot streak (5+ calls in 30 minutes)
+    checkHotStreak(channelId, userName, 'call');
   }
+}
+
+function checkHotStreak(channelId, userName, activityType) {
+  const session = activeSessions[channelId];
+  if (!session) return;
+  
+  const userStats = session.repStats[userName];
+  if (!userStats) return;
+  
+  const now = Date.now();
+  const timestamps = userStats.activityTimestamps || [];
+  
+  if (activityType === 'demo') {
+    // Check for 2+ demos in 20 minutes
+    const recentDemos = timestamps.filter(t => t.type === 'demo' && (now - t.time) < 20 * 60 * 1000);
+    if (recentDemos.length >= 2) {
+      postMessage(channelId, `🔥 *${userName}* IS ON FIRE! ${recentDemos.length} demos in 20 minutes! 🔥`);
+      // Clear timestamps to avoid repeated notifications
+      userStats.activityTimestamps = timestamps.filter(t => t.type !== 'demo' || (now - t.time) >= 20 * 60 * 1000);
+    }
+  } else if (activityType === 'call') {
+    // Check for 5+ calls in 30 minutes
+    const recentCalls = timestamps.filter(t => t.type === 'call' && (now - t.time) < 30 * 60 * 1000);
+    if (recentCalls.length >= 5) {
+      postMessage(channelId, `⚡ *${userName}* is a DIALING MACHINE! ${recentCalls.length} calls in 30 minutes! ⚡`);
+      // Clear timestamps to avoid repeated notifications
+      userStats.activityTimestamps = timestamps.filter(t => t.type !== 'call' || (now - t.time) >= 30 * 60 * 1000);
+    }
+  }
+}
+
+function checkTeamGoal(channelId) {
+  const session = activeSessions[channelId];
+  if (!session || session.teamGoalAnnounced || !process.env.PRIZE_NAME) return;
+  
+  if (session.teamDemos >= 12) {
+    const prizeName = process.env.PRIZE_NAME;
+    postMessage(channelId, `🎉 🎉 🎉 TEAM GOAL ACHIEVED! 🎉 🎉 🎉\n\n12 demos booked! *${prizeName}* unlocked for the team! 🏆`);
+    session.teamGoalAnnounced = true;
+  }
+}
+
+function checkInactivity(channelId) {
+  const session = activeSessions[channelId];
+  if (!session) return;
+  
+  const now = Date.now();
+  const fifteenMinutes = 15 * 60 * 1000;
+  
+  for (const userName in session.repStats) {
+    const userStats = session.repStats[userName];
+    const timeSinceActivity = now - (userStats.lastActivity || now);
+    
+    if (timeSinceActivity >= fifteenMinutes && userStats.dials > 0) {
+      postMessage(channelId, `👀 *${userName}* hasn't made a call in 15 minutes... 👀`);
+      // Update lastActivity to avoid repeated notifications
+      userStats.lastActivity = now;
+    }
+  }
+}
+
+async function finalPushAlert(channelId) {
+  const session = activeSessions[channelId];
+  if (!session) return;
+  
+  const repNames = Object.keys(session.repStats);
+  if (repNames.length === 0) {
+    await postMessage(channelId, "⏰ *10 MINUTES LEFT!* Time to make it count! 📞");
+    return;
+  }
+  
+  const leaderboard = repNames.map(name => {
+      const stats = session.repStats[name];
+      return { name, score: (stats.calls * 1) + (stats.demos * 5), calls: stats.calls, demos: stats.demos };
+  }).sort((a, b) => b.score - a.score);
+  
+  let message = "⏰ *10 MINUTES LEFT!* ⏰\n\nCurrent standings:\n";
+  leaderboard.forEach((rep, index) => {
+    message += `${index + 1}. *${rep.name}* - ${rep.score} pts\n`;
+  });
+  
+  if (leaderboard.length > 1) {
+    const gap = leaderboard[0].score - leaderboard[1].score;
+    if (gap <= 5) {
+      message += `\n🔥 It's CLOSE! Only ${gap} points between 1st and 2nd! Still anyone's game! 🔥`;
+    } else {
+      message += `\n💪 Final push! Can anyone catch ${leaderboard[0].name}?`;
+    }
+  }
+  
+  await postMessage(channelId, message);
 }
 
 async function updateLeaderboard(client, channelId, isFinal = false) {
@@ -247,6 +399,11 @@ async function updateLeaderboard(client, channelId, isFinal = false) {
     });
   }
   
+// Add team progress (only if prize is enabled)
+if (session.teamDemos > 0 && process.env.PRIZE_NAME) {
+  message += `\n> \n> 🎯 *Team Progress:* ${session.teamDemos}/12 demos toward ${process.env.PRIZE_NAME}`;
+}
+  
   if (!isFinal) {
     message += `\n> \n> _Updated: ${new Date().toLocaleTimeString()}_`;
   }
@@ -254,7 +411,7 @@ async function updateLeaderboard(client, channelId, isFinal = false) {
   try {
     if (isFinal) {
         await postMessage(channelId, message);
-    } else if (session.messageTs) { // Only update if we have a message to update
+    } else if (session.messageTs) {
         await client.chat.update({ channel: channelId, ts: session.messageTs, text: message });
     }
   } catch (error) {
@@ -312,9 +469,40 @@ async function postMessageWithGif(channelId, text, gifUrl) {
         });
     } catch (error) { console.error('Error posting GIF message:', error); }
 }
+// Schedule daily digest for 6pm PT (18:00)
+// Cron runs in UTC, so we need to adjust for PT
+// PT is UTC-8 (PST) or UTC-7 (PDT)
+// 6pm PT = 2am UTC (during PDT) or 3am UTC (during PST)
+// Using 2am UTC to match PDT (covers most of the year)
+cron.schedule('0 2 * * *', async () => {
+  console.log('Running scheduled daily digest...');
+  
+  const digestChannelId = process.env.DIGEST_CHANNEL_ID;
+  if (!digestChannelId) {
+    console.error('DIGEST_CHANNEL_ID not set in .env');
+    return;
+  }
+  
+  try {
+    const digest = await generateDailyDigest(owners, true);
+    const message = formatDigestMessage(digest);
+    
+    await app.client.chat.postMessage({
+      token: process.env.SLACK_BOT_TOKEN,
+      channel: digestChannelId,
+      text: message
+    });
+    
+    console.log('Daily digest posted successfully');
+  } catch (error) {
+    console.error('Error posting scheduled digest:', error);
+  }
+}, {
+  timezone: "America/Los_Angeles"
+});
 
 // Start the app
 (async () => {
   await app.start(process.env.PORT || 3000);
-  console.log('⚡️ Power Hour Bot v1.1 (Final) is running!');
+  console.log('⚡️ Power Hour Bot v2.0 is running!');
 })();
