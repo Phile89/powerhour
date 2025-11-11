@@ -179,7 +179,7 @@ app.command('/dailysummary', async ({ command, ack, client }) => {
       text: 'Sorry, there was an error generating the daily summary. Check the logs.'
     });
   }
-});
+})
 
 // --- WEBHOOK HANDLERS ---
 
