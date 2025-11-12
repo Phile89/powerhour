@@ -219,9 +219,20 @@ receiver.app.post('/webhooks/aircall', async (req, res) => {
 
 
 // --- LOGIC FUNCTIONS ---
-
 async function handleNewDial(call) {
-  const userName = call.user?.name || 'Someone';
+  const userName = call.user?.name || 'Unknown';
+  
+  // Get sales team from env (comma-separated list)
+  const salesTeam = process.env.SALES_TEAM ? 
+    process.env.SALES_TEAM.split(',').map(name => name.trim().toLowerCase()) : 
+    [];
+  
+  // Only track if this person is on the sales team
+  if (salesTeam.length > 0 && !salesTeam.includes(userName.toLowerCase())) {
+    console.log(`Ignoring call from ${userName} - not on sales team`);
+    return;
+  }
+  
   for (const channelId in activeSessions) {
     const session = activeSessions[channelId];
     if (!session) continue;
@@ -238,8 +249,8 @@ async function handleNewDial(call) {
     
     if (callAttemptNumber === 1 || callAttemptNumber % 10 === 0) {
       const ordinal = (n) => {
-          const s = ["th", "st", "nd", "rd"], v = n % 100;
-          return n + (s[(v - 20) % 10] || s[v] || s[0]);
+        const s = ["th", "st", "nd", "rd"], v = n % 100;
+        return n + (s[(v - 20) % 10] || s[v] || s[0]);
       };
       const message = (callAttemptNumber === 1)
         ? `🤙 *${userName}* is making their **1st call** of the hour!`
@@ -248,7 +259,6 @@ async function handleNewDial(call) {
     }
   }
 }
-
 async function handleNewDemo(deal, ownerId) {
   const ownerName = owners[ownerId] || `Owner ${ownerId}`;
   const dealName = deal.properties.dealname || 'a new client';
@@ -281,9 +291,34 @@ async function handleNewDemo(deal, ownerId) {
 }
 
 async function handleNewCall(call) {
-  const userName = call.user?.name || 'Someone';
+  const userName = call.user?.name || 'Unknown';
+  
+  // Get sales team from env (comma-separated list)
+  const salesTeam = process.env.SALES_TEAM ? 
+    process.env.SALES_TEAM.split(',').map(name => name.trim().toLowerCase()) : 
+    [];
+  
+  // Only track if this person is on the sales team
+  if (salesTeam.length > 0 && !salesTeam.includes(userName.toLowerCase())) {
+    console.log(`Ignoring completed call from ${userName} - not on sales team`);
+    return;
+  }
+  
   const duration = Math.round(call.duration / 60);
-  const contactName = call.contact?.company_name || call.contact?.name || call.number;
+  // Better contact name parsing
+let contactName = 'Unknown Contact';
+if (call.contact) {
+  contactName = call.contact.company_name 
+    || call.contact.first_name 
+    || call.contact.last_name 
+    || (call.contact.first_name && call.contact.last_name ? `${call.contact.first_name} ${call.contact.last_name}` : null)
+    || call.raw_digits 
+    || 'Unknown Contact';
+} else if (call.raw_digits) {
+  contactName = call.raw_digits;
+} else if (call.number && typeof call.number === 'string') {
+  contactName = call.number;
+}
   
   for (const channelId in activeSessions) {
     const session = activeSessions[channelId];
