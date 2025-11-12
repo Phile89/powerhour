@@ -93,6 +93,7 @@ async function getDemosCompletedToday(date = new Date()) {
 }
 
 // Get all calls from Aircall for a specific day
+// Get all calls from Aircall for a specific day
 async function getCallsForDay(date = new Date()) {
   const { startMs, endMs } = getDayRange(date);
   const fromTimestamp = Math.floor(startMs / 1000);
@@ -112,9 +113,9 @@ async function getCallsForDay(date = new Date()) {
       }
     });
     
-    // Filter for calls > 2 minutes
-    const filteredCalls = response.data.calls.filter(call => call.duration >= 120);
-    return filteredCalls;
+    // Return ALL answered calls (not just >2 mins)
+    const answeredCalls = response.data.calls.filter(call => call.answered_at);
+    return answeredCalls;
   } catch (error) {
     console.error('Error fetching Aircall calls:', error.message);
     return [];
@@ -177,6 +178,7 @@ function formatHour(hour) {
 }
 
 // Build leaderboard with scoring
+// Build leaderboard with scoring
 function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
   const repStats = {};
   
@@ -186,35 +188,40 @@ function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
     const ownerName = owners[ownerId] || `Owner ${ownerId}`;
     
     if (!repStats[ownerName]) {
-      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, calls: 0, score: 0 };
+      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, score: 0 };
     }
     repStats[ownerName].demosBooked += 1;
   });
   
-  // Count demos completed (10 points each)
+  // Count demos completed (5 points each)
   demosCompleted.forEach(deal => {
     const ownerId = deal.properties.hubspot_owner_id;
     const ownerName = owners[ownerId] || `Owner ${ownerId}`;
     
     if (!repStats[ownerName]) {
-      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, calls: 0, score: 0 };
+      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, score: 0 };
     }
     repStats[ownerName].demosCompleted += 1;
   });
   
-  // Count calls (1 point each)
+  // Count calls - separate connections (<2min) from conversations (>=2min)
   calls.forEach(call => {
     const userName = call.user?.name || 'Unknown';
     
     if (!repStats[userName]) {
-      repStats[userName] = { demosBooked: 0, demosCompleted: 0, calls: 0, score: 0 };
+      repStats[userName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, score: 0 };
     }
-    repStats[userName].calls += 1;
+    
+    if (call.duration >= 120) {
+      repStats[userName].conversations += 1; // 2 points
+    } else {
+      repStats[userName].connections += 1; // 1 point
+    }
   });
   
-  // Calculate scores
+  // Calculate scores: 5pts per demo completed, 3pts per demo booked, 2pts per conversation, 1pt per connection
   Object.values(repStats).forEach(stats => {
-    stats.score = (stats.demosCompleted * 10) + (stats.demosBooked * 3) + (stats.calls * 1);
+    stats.score = (stats.demosCompleted * 5) + (stats.demosBooked * 3) + (stats.conversations * 2) + (stats.connections * 1);
   });
   
   // Sort by score
@@ -319,18 +326,19 @@ function formatDigestMessage(digest) {
   }
   
   // Leaderboard
-  message += `*🏆 DAILY LEADERBOARD*\n`;
-  message += `_10 pts per demo completed • 3 pts per demo booked • 1 pt per call_\n\n`;
-  
-  if (leaderboard.length === 0) {
-    message += `> _No activity today_\n`;
-  } else {
-    leaderboard.forEach((rep, index) => {
-      const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `   ${index + 1}.`;
-      message += `> ${medal} *${rep.name}* - ${rep.score} pts\n`;
-      message += `>       ${rep.calls} calls • ${rep.demosBooked} demos booked • ${rep.demosCompleted} demos completed\n`;
-    });
-  }
+  // Leaderboard
+message += `*🏆 DAILY LEADERBOARD*\n`;
+message += `_5 pts per demo completed • 3 pts per demo booked • 2 pts per conversation • 1 pt per connection_\n\n`;
+
+if (leaderboard.length === 0) {
+  message += `> _No activity today_\n`;
+} else {
+  leaderboard.forEach((rep, index) => {
+    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `   ${index + 1}.`;
+    message += `> ${medal} *${rep.name}* - ${rep.score} pts\n`;
+    message += `>       ${rep.conversations} conversations • ${rep.connections} connections • ${rep.demosBooked} demos booked • ${rep.demosCompleted} demos completed\n`;
+  });
+}
   
   return message;
 }

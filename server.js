@@ -62,7 +62,7 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
       teamGoalAnnounced: false
     };
     
-    const rules = ">*Scoring Rules:*\n> • *5 points* per Demo Booked\n> • *1 point* per Call (over 2 mins)";
+    const rules = ">*Scoring Rules:*\n> • *5 points* per Demo Completed\n> • *3 points* per Demo Booked\n> • *2 points* per Conversation (call over 2 mins)\n> • *1 point* per Connection (answered call)";
     const title = `⚡ *POWER HOUR STARTED for ${formattedDate}!* ⚡\n_Running for ${duration} minutes_\nTracking activity in real-time...\n\n${rules}`;
     const leaderboardText = `📊 *LIVE LEADERBOARD*\n> _Waiting for activity..._`;
     const tipText = "💡 Tip: Use `/leaderboard` at any time to see the current standings.";
@@ -492,7 +492,7 @@ async function postMessageWithGif(channelId, text, gifUrl) {
 // PT is UTC-8 (PST) or UTC-7 (PDT)
 // 6pm PT = 2am UTC (during PDT) or 3am UTC (during PST)
 // Using 2am UTC to match PDT (covers most of the year)
-cron.schedule('0 2 * * *', async () => {
+cron.schedule('0 18 * * *', async () => {
   console.log('Running scheduled daily digest...');
   
   const digestChannelId = process.env.DIGEST_CHANNEL_ID;
