@@ -56,13 +56,14 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
       interval: null,
       inactivityInterval: null,
       finalPushTimeout: null,
+      halfwayTimeout: null,
       startTime: Date.now(),
       duration: duration, // in minutes
       teamDemos: 0,
       teamGoalAnnounced: false
     };
     
-    const rules = ">*Scoring Rules:*\n> • *5 points* per Demo Completed\n> • *3 points* per Demo Booked\n> • *2 points* per Conversation (call over 2 mins)\n> • *1 point* per Connection (answered call)";
+    const rules = ">*Power Hour Scoring:*\n> • *5 points* per Demo Booked\n> • *2 points* per Conversation (call over 2 mins)\n> • *1 point* per Connection (answered call)";
     const title = `⚡ *POWER HOUR STARTED for ${formattedDate}!* ⚡\n_Running for ${duration} minutes_\nTracking activity in real-time...\n\n${rules}`;
     const leaderboardText = `📊 *LIVE LEADERBOARD*\n> _Waiting for activity..._`;
     const tipText = "💡 Tip: Use `/leaderboard` at any time to see the current standings.";
@@ -89,6 +90,14 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
       checkInactivity(channelId);
     }, 300000); // 5 minutes
 
+    // Schedule halfway alert
+    const halfwayTime = (duration / 2) * 60 * 1000; // Convert to milliseconds
+    if (halfwayTime > 0) {
+      activeSessions[channelId].halfwayTimeout = setTimeout(() => {
+        halfwayAlert(channelId, duration);
+      }, halfwayTime);
+    }
+
     // Schedule final push alert (10 minutes before end)
     const finalPushTime = (duration - 10) * 60 * 1000; // Convert to milliseconds
     if (finalPushTime > 0) {
@@ -107,6 +116,7 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
     clearInterval(activeSessions[channelId].interval);
     clearInterval(activeSessions[channelId].inactivityInterval);
     clearTimeout(activeSessions[channelId].finalPushTimeout);
+    clearTimeout(activeSessions[channelId].halfwayTimeout);
 
     await say('🏁 *Power Hour Complete!* Generating final results...');
     await updateLeaderboard(client, channelId, true);
@@ -136,13 +146,23 @@ app.command('/leaderboard', async ({ command, ack, respond }) => {
 
   const leaderboard = repNames.map(name => {
       const stats = session.repStats[name];
-      return { name, score: (stats.calls * 1) + (stats.demos * 5), calls: stats.calls, demos: stats.demos };
+      // Power Hour scoring: connections (1pt) + conversations (2pts) + demos (5pts)
+      const connectionPoints = (stats.connections || 0) * 1;
+      const conversationPoints = (stats.conversations || 0) * 2;
+      const demoPoints = (stats.demos || 0) * 5;
+      return { 
+        name, 
+        score: connectionPoints + conversationPoints + demoPoints,
+        connections: stats.connections || 0,
+        conversations: stats.conversations || 0,
+        demos: stats.demos || 0
+      };
   }).sort((a, b) => b.score - a.score);
 
   let message = "Here is the current leaderboard:\n\n";
   leaderboard.forEach((rep, index) => {
     const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `   ${index + 1}.`;
-    message += `> ${medal} *${rep.name}* - ${rep.score} pts _(${rep.calls} calls, ${rep.demos} demos)_\n`;
+    message += `> ${medal} *${rep.name}* - ${rep.score} pts _(${rep.connections} connections, ${rep.conversations} conversations, ${rep.demos} demos)_\n`;
   });
 
   await respond({ response_type: 'ephemeral', text: message });
@@ -205,10 +225,14 @@ receiver.app.post('/webhooks/aircall', async (req, res) => {
   const event = req.body;
   console.log(`Aircall webhook received: ${event.event}`);
   try {
-    if (event.event === 'call.created') {
-        await handleNewDial(event.data);
-    } else if (event.event === 'call.ended' && event.data.duration >= 120) {
-      await handleNewCall(event.data);
+    if (event.event === 'call.answered') {
+        // Track connections (answered calls)
+        await handleConnection(event.data);
+    } else if (event.event === 'call.ended') {
+      if (event.data.duration >= 120) {
+        // Track conversations (2+ min calls)
+        await handleConversation(event.data);
+      }
     }
     res.status(200).send('OK');
   } catch (error) {
@@ -219,7 +243,9 @@ receiver.app.post('/webhooks/aircall', async (req, res) => {
 
 
 // --- LOGIC FUNCTIONS ---
-async function handleNewDial(call) {
+
+// Handle connection (answered call - any duration)
+async function handleConnection(call) {
   const userName = call.user?.name || 'Unknown';
   
   // Get sales team from env (comma-separated list)
@@ -239,10 +265,18 @@ async function handleNewDial(call) {
     
     let userStats = session.repStats[userName];
     if (!userStats) {
-      userStats = { calls: 0, demos: 0, dials: 0, lastActivity: Date.now(), activityTimestamps: [] };
+      userStats = { 
+        connections: 0, 
+        conversations: 0, 
+        demos: 0, 
+        dials: 0, 
+        lastActivity: Date.now(), 
+        activityTimestamps: [] 
+      };
       session.repStats[userName] = userStats;
     }
 
+    userStats.connections = (userStats.connections || 0) + 1;
     userStats.dials = (userStats.dials || 0) + 1;
     userStats.lastActivity = Date.now();
     const callAttemptNumber = userStats.dials;
@@ -259,38 +293,9 @@ async function handleNewDial(call) {
     }
   }
 }
-async function handleNewDemo(deal, ownerId) {
-  const ownerName = owners[ownerId] || `Owner ${ownerId}`;
-  const dealName = deal.properties.dealname || 'a new client';
 
-  for (const channelId in activeSessions) {
-    const session = activeSessions[channelId];
-    if (!session) continue;
-    
-    if (!session.repStats[ownerName]) {
-      session.repStats[ownerName] = { calls: 0, demos: 0, dials: 0, lastActivity: Date.now(), activityTimestamps: [] };
-    }
-    session.repStats[ownerName].demos += 1;
-    session.repStats[ownerName].lastActivity = Date.now();
-    session.repStats[ownerName].activityTimestamps.push({ type: 'demo', time: Date.now() });
-    
-    // Track team demos
-    session.teamDemos += 1;
-    
-    const gifUrl = await getRandomGif('celebration cheering');
-    const messageText = `🔥 *${ownerName}* just booked a demo with *${dealName}*! 🎯`;
-    
-    await postMessageWithGif(channelId, messageText, gifUrl);
-    
-    // Check for hot streak (2+ demos in 20 minutes)
-    checkHotStreak(channelId, ownerName, 'demo');
-    
-    // Check for team goal
-    checkTeamGoal(channelId);
-  }
-}
-
-async function handleNewCall(call) {
+// Handle conversation (call over 2 mins)
+async function handleConversation(call) {
   const userName = call.user?.name || 'Unknown';
   
   // Get sales team from env (comma-separated list)
@@ -305,36 +310,67 @@ async function handleNewCall(call) {
   }
   
   const duration = Math.round(call.duration / 60);
-  // Better contact name parsing
-let contactName = 'Unknown Contact';
-if (call.contact) {
-  contactName = call.contact.company_name 
-    || call.contact.first_name 
-    || call.contact.last_name 
-    || (call.contact.first_name && call.contact.last_name ? `${call.contact.first_name} ${call.contact.last_name}` : null)
-    || call.raw_digits 
-    || 'Unknown Contact';
-} else if (call.raw_digits) {
-  contactName = call.raw_digits;
-} else if (call.number && typeof call.number === 'string') {
-  contactName = call.number;
-}
   
   for (const channelId in activeSessions) {
     const session = activeSessions[channelId];
     if (!session) continue;
      
     if (!session.repStats[userName]) {
-      session.repStats[userName] = { calls: 0, demos: 0, dials: 0, lastActivity: Date.now(), activityTimestamps: [] };
+      session.repStats[userName] = { 
+        connections: 0, 
+        conversations: 0, 
+        demos: 0, 
+        dials: 0, 
+        lastActivity: Date.now(), 
+        activityTimestamps: [] 
+      };
     }
-    session.repStats[userName].calls += 1;
+    session.repStats[userName].conversations = (session.repStats[userName].conversations || 0) + 1;
     session.repStats[userName].lastActivity = Date.now();
-    session.repStats[userName].activityTimestamps.push({ type: 'call', time: Date.now() });
+    session.repStats[userName].activityTimestamps.push({ type: 'conversation', time: Date.now() });
     
-    await postMessage(channelId, `📞 *${userName}* just completed a ${duration} min call with *${contactName}*!`);
+    await postMessage(channelId, `📞 *${userName}* just completed a ${duration} min call!`);
     
-    // Check for hot streak (5+ calls in 30 minutes)
-    checkHotStreak(channelId, userName, 'call');
+    // Check for hot streak (5+ conversations in 30 minutes)
+    checkHotStreak(channelId, userName, 'conversation');
+  }
+}
+
+async function handleNewDemo(deal, ownerId) {
+  const ownerName = owners[ownerId] || `Owner ${ownerId}`;
+  const dealName = deal.properties.dealname || 'a new client';
+
+  for (const channelId in activeSessions) {
+    const session = activeSessions[channelId];
+    if (!session) continue;
+    
+    if (!session.repStats[ownerName]) {
+      session.repStats[ownerName] = { 
+        connections: 0, 
+        conversations: 0, 
+        demos: 0, 
+        dials: 0, 
+        lastActivity: Date.now(), 
+        activityTimestamps: [] 
+      };
+    }
+    session.repStats[ownerName].demos = (session.repStats[ownerName].demos || 0) + 1;
+    session.repStats[ownerName].lastActivity = Date.now();
+    session.repStats[ownerName].activityTimestamps.push({ type: 'demo', time: Date.now() });
+    
+    // Track team demos
+    session.teamDemos += 1;
+    
+    const gifUrl = await getRandomGif('office celebration excited team');
+    const messageText = `🔥 *${ownerName}* just booked a demo with *${dealName}*! 🎯`;
+    
+    await postMessageWithGif(channelId, messageText, gifUrl);
+    
+    // Check for hot streak (2+ demos in 20 minutes)
+    checkHotStreak(channelId, ownerName, 'demo');
+    
+    // Check for team goal
+    checkTeamGoal(channelId);
   }
 }
 
@@ -356,13 +392,13 @@ function checkHotStreak(channelId, userName, activityType) {
       // Clear timestamps to avoid repeated notifications
       userStats.activityTimestamps = timestamps.filter(t => t.type !== 'demo' || (now - t.time) >= 20 * 60 * 1000);
     }
-  } else if (activityType === 'call') {
-    // Check for 5+ calls in 30 minutes
-    const recentCalls = timestamps.filter(t => t.type === 'call' && (now - t.time) < 30 * 60 * 1000);
+  } else if (activityType === 'conversation') {
+    // Check for 5+ conversations in 30 minutes
+    const recentCalls = timestamps.filter(t => t.type === 'conversation' && (now - t.time) < 30 * 60 * 1000);
     if (recentCalls.length >= 5) {
       postMessage(channelId, `⚡ *${userName}* is a DIALING MACHINE! ${recentCalls.length} calls in 30 minutes! ⚡`);
       // Clear timestamps to avoid repeated notifications
-      userStats.activityTimestamps = timestamps.filter(t => t.type !== 'call' || (now - t.time) >= 30 * 60 * 1000);
+      userStats.activityTimestamps = timestamps.filter(t => t.type !== 'conversation' || (now - t.time) >= 30 * 60 * 1000);
     }
   }
 }
@@ -397,6 +433,47 @@ function checkInactivity(channelId) {
   }
 }
 
+async function halfwayAlert(channelId, totalDuration) {
+  const session = activeSessions[channelId];
+  if (!session) return;
+  
+  const repNames = Object.keys(session.repStats);
+  if (repNames.length === 0) {
+    await postMessage(channelId, `⏰ *HALFWAY THERE!* ${totalDuration / 2} minutes down, ${totalDuration / 2} to go! 📞`);
+    return;
+  }
+  
+  const leaderboard = repNames.map(name => {
+      const stats = session.repStats[name];
+      const connectionPoints = (stats.connections || 0) * 1;
+      const conversationPoints = (stats.conversations || 0) * 2;
+      const demoPoints = (stats.demos || 0) * 5;
+      return { 
+        name, 
+        score: connectionPoints + conversationPoints + demoPoints,
+        connections: stats.connections || 0,
+        conversations: stats.conversations || 0,
+        demos: stats.demos || 0
+      };
+  }).sort((a, b) => b.score - a.score);
+  
+  let message = `⏰ *HALFWAY THERE!* ⏰\n${totalDuration / 2} minutes down, ${totalDuration / 2} to go!\n\nCurrent standings:\n`;
+  leaderboard.forEach((rep, index) => {
+    message += `${index + 1}. *${rep.name}* - ${rep.score} pts\n`;
+  });
+  
+  if (leaderboard.length > 1) {
+    const gap = leaderboard[0].score - leaderboard[1].score;
+    if (gap <= 5) {
+      message += `\n🔥 It's neck and neck! Only ${gap} points between 1st and 2nd! 🔥`;
+    } else {
+      message += `\n💪 Keep pushing! Plenty of time to catch up!`;
+    }
+  }
+  
+  await postMessage(channelId, message);
+}
+
 async function finalPushAlert(channelId) {
   const session = activeSessions[channelId];
   if (!session) return;
@@ -409,7 +486,16 @@ async function finalPushAlert(channelId) {
   
   const leaderboard = repNames.map(name => {
       const stats = session.repStats[name];
-      return { name, score: (stats.calls * 1) + (stats.demos * 5), calls: stats.calls, demos: stats.demos };
+      const connectionPoints = (stats.connections || 0) * 1;
+      const conversationPoints = (stats.conversations || 0) * 2;
+      const demoPoints = (stats.demos || 0) * 5;
+      return { 
+        name, 
+        score: connectionPoints + conversationPoints + demoPoints,
+        connections: stats.connections || 0,
+        conversations: stats.conversations || 0,
+        demos: stats.demos || 0
+      };
   }).sort((a, b) => b.score - a.score);
   
   let message = "⏰ *10 MINUTES LEFT!* ⏰\n\nCurrent standings:\n";
@@ -436,7 +522,16 @@ async function updateLeaderboard(client, channelId, isFinal = false) {
   const repNames = Object.keys(session.repStats);
   const leaderboard = repNames.map(name => {
       const stats = session.repStats[name];
-      return { name, score: (stats.calls * 1) + (stats.demos * 5), calls: stats.calls, demos: stats.demos };
+      const connectionPoints = (stats.connections || 0) * 1;
+      const conversationPoints = (stats.conversations || 0) * 2;
+      const demoPoints = (stats.demos || 0) * 5;
+      return { 
+        name, 
+        score: connectionPoints + conversationPoints + demoPoints,
+        connections: stats.connections || 0,
+        conversations: stats.conversations || 0,
+        demos: stats.demos || 0
+      };
   }).sort((a, b) => b.score - a.score);
   
   await generateDynamicCommentary(channelId, leaderboard, session.previousLeaderboard);
@@ -448,7 +543,7 @@ async function updateLeaderboard(client, channelId, isFinal = false) {
   } else {
     leaderboard.forEach((rep, index) => {
       const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `   ${index + 1}.`;
-      message += `> ${medal} *${rep.name}* - ${rep.score} pts _(${rep.calls} calls, ${rep.demos} demos)_\n`;
+      message += `> ${medal} *${rep.name}* - ${rep.score} pts _(${rep.connections} connections, ${rep.conversations} conversations, ${rep.demos} demos)_\n`;
     });
   }
   
