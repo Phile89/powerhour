@@ -1,6 +1,5 @@
 const axios = require('axios');
 
-// Get start and end of a specific date in ISO format
 function getDayRange(date = new Date()) {
   // Convert to Pacific Time for start/end of day
   const options = { timeZone: 'America/Los_Angeles' };
