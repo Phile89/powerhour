@@ -70,17 +70,17 @@ async function getDemosCompletedToday(date = new Date()) {
       filterGroups: [
         {
           filters: [
-  {
-    propertyName: 'demo_completed_date__c',
-    operator: 'GTE',
-    value: startMs
-  },
-  {
-    propertyName: 'demo_completed_date__c',
-    operator: 'LTE',
-    value: endMs
-  }
-]
+            {
+              propertyName: 'demo_completed_date__c',
+              operator: 'GTE',
+              value: startMs
+            },
+            {
+              propertyName: 'demo_completed_date__c',
+              operator: 'LTE',
+              value: endMs
+            }
+          ]
         }
       ],
       properties: ['dealname', 'demo_completed_date__c', 'hubspot_owner_id'],
@@ -99,32 +99,45 @@ async function getDemosCompletedToday(date = new Date()) {
   }
 }
 
-// Get all calls from Aircall for a specific day
-// Get all calls from Aircall for a specific day
+// Get all calls from HubSpot for a specific day (includes both HubSpot + Aircall calls)
 async function getCallsForDay(date = new Date()) {
   const { startMs, endMs } = getDayRange(date);
-  const fromTimestamp = Math.floor(startMs / 1000);
-  const toTimestamp = Math.floor(endMs / 1000);
-  
-  const auth = Buffer.from(`${process.env.AIRCALL_API_ID}:${process.env.AIRCALL_API_TOKEN}`).toString('base64');
   
   try {
-    const response = await axios.get('https://api.aircall.io/v1/calls', {
+    const response = await axios.post('https://api.hubapi.com/crm/v3/objects/calls/search', {
+      filterGroups: [
+        {
+          filters: [
+            {
+              propertyName: 'hs_createdate',
+              operator: 'GTE',
+              value: startMs
+            },
+            {
+              propertyName: 'hs_createdate',
+              operator: 'LTE',
+              value: endMs
+            }
+          ]
+        }
+      ],
+      properties: ['hs_call_title', 'hs_createdate', 'hubspot_owner_id', 'hs_call_duration', 'hs_call_to_number', 'hs_call_status'],
+      limit: 100
+    }, {
       headers: {
-        'Authorization': `Basic ${auth}`
-      },
-      params: {
-        from: fromTimestamp,
-        to: toTimestamp,
-        per_page: 50
+        'Authorization': `Bearer ${process.env.HUBSPOT_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
       }
     });
     
-    // Return ALL answered calls (not just >2 mins)
-    const answeredCalls = response.data.calls.filter(call => call.answered_at);
-    return answeredCalls;
+    // Filter for completed/connected calls only
+    const completedCalls = response.data.results.filter(call => 
+      call.properties.hs_call_status === 'COMPLETED'
+    );
+    
+    return completedCalls;
   } catch (error) {
-    console.error('Error fetching Aircall calls:', error.message);
+    console.error('Error fetching HubSpot calls:', error.response?.data || error.message);
     return [];
   }
 }
@@ -141,19 +154,26 @@ function analyzeCallMetrics(calls) {
     };
   }
   
-  const totalSeconds = calls.reduce((sum, call) => sum + call.duration, 0);
-  const totalMinutes = Math.round(totalSeconds / 60);
-  const averageDuration = Math.round(totalSeconds / calls.length / 60);
+  // HubSpot stores duration in milliseconds
+  const totalMilliseconds = calls.reduce((sum, call) => {
+    const duration = parseInt(call.properties.hs_call_duration) || 0;
+    return sum + duration;
+  }, 0);
+  
+  const totalMinutes = Math.round(totalMilliseconds / 60000);
+  const averageDuration = Math.round(totalMilliseconds / calls.length / 60000);
   
   // Find longest call
-  const longestCall = calls.reduce((longest, call) => 
-    call.duration > (longest?.duration || 0) ? call : longest
-  , null);
+  const longestCall = calls.reduce((longest, call) => {
+    const duration = parseInt(call.properties.hs_call_duration) || 0;
+    const longestDuration = longest?.duration || 0;
+    return duration > longestDuration ? { ...call, duration } : longest;
+  }, null);
   
   // Find most active hour
   const hourCounts = {};
   calls.forEach(call => {
-    const hour = new Date(call.started_at * 1000).getHours();
+    const hour = new Date(parseInt(call.properties.hs_createdate)).getHours();
     hourCounts[hour] = (hourCounts[hour] || 0) + 1;
   });
   
@@ -166,9 +186,9 @@ function analyzeCallMetrics(calls) {
     totalMinutes,
     averageDuration,
     longestCall: longestCall ? {
-      duration: Math.round(longestCall.duration / 60),
-      user: longestCall.user?.name || 'Unknown',
-      contact: longestCall.contact?.company_name || longestCall.contact?.name || longestCall.raw_digits || 'Unknown'
+      duration: Math.round(longestCall.duration / 60000),
+      user: 'Rep',
+      contact: longestCall.properties.hs_call_to_number || 'Unknown'
     } : null,
     mostActiveHour: mostActiveHour.hour !== null ? {
       hour: mostActiveHour.hour,
@@ -184,7 +204,6 @@ function formatHour(hour) {
   return `${displayHour}${period}`;
 }
 
-// Build leaderboard with scoring
 // Build leaderboard with scoring
 function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
   const repStats = {};
@@ -211,18 +230,23 @@ function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
     repStats[ownerName].demosCompleted += 1;
   });
   
-  // Count calls - separate connections (<2min) from conversations (>=2min)
+  // Count calls from HubSpot - separate connections (<2min) from conversations (>=2min)
   calls.forEach(call => {
-    const userName = call.user?.name || 'Unknown';
+    const ownerId = call.properties.hubspot_owner_id;
+    const ownerName = owners[ownerId] || `Owner ${ownerId}`;
     
-    if (!repStats[userName]) {
-      repStats[userName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, score: 0 };
+    if (!repStats[ownerName]) {
+      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, score: 0 };
     }
     
-    if (call.duration >= 120) {
-      repStats[userName].conversations += 1; // 2 points
+    // HubSpot duration is in milliseconds
+    const durationMs = parseInt(call.properties.hs_call_duration) || 0;
+    const durationSeconds = durationMs / 1000;
+    
+    if (durationSeconds >= 120) {
+      repStats[ownerName].conversations += 1; // 2 points
     } else {
-      repStats[userName].connections += 1; // 1 point
+      repStats[ownerName].connections += 1; // 1 point
     }
   });
   
@@ -333,19 +357,18 @@ function formatDigestMessage(digest) {
   }
   
   // Leaderboard
-  // Leaderboard
-message += `*🏆 DAILY LEADERBOARD*\n`;
-message += `_5 pts per demo completed • 3 pts per demo booked • 2 pts per conversation • 1 pt per connection_\n\n`;
+  message += `*🏆 DAILY LEADERBOARD*\n`;
+  message += `_5 pts per demo completed • 3 pts per demo booked • 2 pts per conversation • 1 pt per connection_\n\n`;
 
-if (leaderboard.length === 0) {
-  message += `> _No activity today_\n`;
-} else {
-  leaderboard.forEach((rep, index) => {
-    const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `   ${index + 1}.`;
-    message += `> ${medal} *${rep.name}* - ${rep.score} pts\n`;
-    message += `>       ${rep.conversations} conversations • ${rep.connections} connections • ${rep.demosBooked} demos booked • ${rep.demosCompleted} demos completed\n`;
-  });
-}
+  if (leaderboard.length === 0) {
+    message += `> _No activity today_\n`;
+  } else {
+    leaderboard.forEach((rep, index) => {
+      const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `   ${index + 1}.`;
+      message += `> ${medal} *${rep.name}* - ${rep.score} pts\n`;
+      message += `>       ${rep.conversations} conversations • ${rep.connections} connections • ${rep.demosBooked} demos booked • ${rep.demosCompleted} demos completed\n`;
+    });
+  }
   
   return message;
 }
