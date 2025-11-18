@@ -61,21 +61,26 @@ async function getDemosBookedToday(date = new Date()) {
   }
 }
 
-// Get demos completed today (demo_completed_date__c = today)
 async function getDemosCompletedToday(date = new Date()) {
-  const dateString = date.toISOString().split('T')[0]; // YYYY-MM-DD format
+  // HubSpot expects timestamp in milliseconds for date properties
+  const { startMs, endMs } = getDayRange(date);
   
   try {
     const response = await axios.post('https://api.hubapi.com/crm/v3/objects/deals/search', {
       filterGroups: [
         {
           filters: [
-            {
-              propertyName: 'demo_completed_date__c',
-              operator: 'EQ',
-              value: dateString
-            }
-          ]
+  {
+    propertyName: 'demo_completed_date__c',
+    operator: 'GTE',
+    value: startMs
+  },
+  {
+    propertyName: 'demo_completed_date__c',
+    operator: 'LTE',
+    value: endMs
+  }
+]
         }
       ],
       properties: ['dealname', 'demo_completed_date__c', 'hubspot_owner_id'],
