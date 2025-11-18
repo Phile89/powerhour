@@ -169,21 +169,35 @@ app.command('/leaderboard', async ({ command, ack, respond }) => {
 });
 
 app.command('/dailysummary', async ({ command, ack, client }) => {
-  // Acknowledge immediately
   await ack();
   
   const channelId = command.channel_id;
+  const dateArg = command.text.trim();
   
-  // Post initial message
+  // Parse the date argument
+  let targetDate = new Date();
+  if (dateArg) {
+    if (dateArg.toLowerCase() === 'yesterday') {
+      targetDate.setDate(targetDate.getDate() - 1);
+    } else {
+      // Try to parse as YYYY-MM-DD
+      const parsed = new Date(dateArg);
+      if (!isNaN(parsed.getTime())) {
+        targetDate = parsed;
+      }
+    }
+  }
+  
+  const dateString = targetDate.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  
   await client.chat.postMessage({
     token: process.env.SLACK_BOT_TOKEN,
     channel: channelId,
-    text: '📊 Generating daily sales digest...'
+    text: `📊 Generating digest for ${dateString}...`
   });
   
-  // Generate digest asynchronously (can take time)
   try {
-    const digest = await generateDailyDigest(owners, true);
+    const digest = await generateDailyDigest(owners, true, targetDate);
     const message = formatDigestMessage(digest);
     
     await client.chat.postMessage({
@@ -196,10 +210,10 @@ app.command('/dailysummary', async ({ command, ack, client }) => {
     await client.chat.postMessage({
       token: process.env.SLACK_BOT_TOKEN,
       channel: channelId,
-      text: 'Sorry, there was an error generating the daily summary. Check the logs.'
+      text: 'Sorry, there was an error generating the summary. Check the logs.'
     });
   }
-})
+});
 
 // --- WEBHOOK HANDLERS ---
 

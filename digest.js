@@ -264,8 +264,8 @@ function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
 }
 
 // Generate the full daily digest
-async function generateDailyDigest(owners, includeComparison = true) {
-  const today = new Date();
+async function generateDailyDigest(owners, includeComparison = true, targetDate = new Date()) {
+  const today = targetDate;
   const lastWeek = new Date(today);
   lastWeek.setDate(lastWeek.getDate() - 7);
   
