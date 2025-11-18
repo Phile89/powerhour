@@ -622,7 +622,7 @@ async function postMessageWithGif(channelId, text, gifUrl) {
 // PT is UTC-8 (PST) or UTC-7 (PDT)
 // 6pm PT = 2am UTC (during PDT) or 3am UTC (during PST)
 // Using 2am UTC to match PDT (covers most of the year)
-cron.schedule('0 18 * * *', async () => {
+cron.schedule('0 18 * * 1-5', async () => {
   console.log('Running scheduled daily digest...');
   
   const digestChannelId = process.env.DIGEST_CHANNEL_ID;
