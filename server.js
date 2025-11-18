@@ -181,10 +181,10 @@ app.command('/dailysummary', async ({ command, ack, client }) => {
       targetDate.setDate(targetDate.getDate() - 1);
     } else {
       // Try to parse as YYYY-MM-DD
-      const parsed = new Date(dateArg);
-      if (!isNaN(parsed.getTime())) {
-        targetDate = parsed;
-      }
+const parsed = new Date(dateArg + 'T12:00:00'); // Add midday time to avoid timezone issues
+if (!isNaN(parsed.getTime())) {
+  targetDate = parsed;
+}
     }
   }
   
