@@ -143,7 +143,7 @@ async function getCallsForDay(date = new Date()) {
 }
 
 // Analyze calls to get metrics
-function analyzeCallMetrics(calls) {
+function analyzeCallMetrics(calls, owners = {}) {
   if (calls.length === 0) {
     return {
       totalCalls: 0,
@@ -187,7 +187,7 @@ function analyzeCallMetrics(calls) {
     averageDuration,
     longestCall: longestCall ? {
       duration: Math.round(longestCall.duration / 60000),
-      user: 'Rep',
+      user: owners[longestCall.properties.hubspot_owner_id] || 'Unknown Rep',
       contact: longestCall.properties.hs_call_to_number || 'Unknown'
     } : null,
     mostActiveHour: mostActiveHour.hour !== null ? {
@@ -292,7 +292,7 @@ async function generateDailyDigest(owners, includeComparison = true, targetDate 
     };
   }
   
-  const metrics = analyzeCallMetrics(callsToday);
+  const metrics = analyzeCallMetrics(callsToday, owners);
   const leaderboard = buildLeaderboard(demosBookedToday, demosCompletedToday, callsToday, owners);
   
   // Calculate conversion rate
