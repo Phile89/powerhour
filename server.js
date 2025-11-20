@@ -93,48 +93,28 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
     }, 300000); // 5 minutes
 
     // Schedule halfway alert
-    const halfwayTime = (duration / 2) * 60 * 1000; // Convert to milliseconds
-    if (halfwayTime > 0) {
-      activeSessions[channelId].halfwayTimeout = setTimeout(() => {
-        halfwayAlert(channelId, duration);
-      }, halfwayTime);
-    }
+const halfwayTime = (duration / 2) * 60 * 1000; // Convert to milliseconds
+if (halfwayTime > 0) {
+  activeSessions[channelId].halfwayTimeout = setTimeout(() => {
+    halfwayAlert(channelId, duration);
+  }, halfwayTime);
+}
 
-    // Schedule final push alert (10 minutes before end)
-    const finalPushTime = (duration - 10) * 60 * 1000; // Convert to milliseconds
-    if (finalPushTime > 0) {
-      activeSessions[channelId].finalPushTimeout = setTimeout(() => {
-        finalPushAlert(channelId);
-      }, finalPushTime);
-    }
+// Schedule final push alert (10 minutes before end)
+const finalPushTime = (duration - 10) * 60 * 1000; // Convert to milliseconds
+if (finalPushTime > 0) {
+  activeSessions[channelId].finalPushTimeout = setTimeout(() => {
+    finalPushAlert(channelId);
+  }, finalPushTime);
+}
 
-  } else if (action === 'stop') {
-    if (!activeSessions[channelId]) {
-      await say("There's no active Power Hour to stop in this channel.");
-      return;
-    }
-    
-    // Clear all intervals and timeouts
-    clearInterval(activeSessions[channelId].interval);
-    clearInterval(activeSessions[channelId].inactivityInterval);
-    clearTimeout(activeSessions[channelId].finalPushTimeout);
-    clearTimeout(activeSessions[channelId].halfwayTimeout);
-    clearTimeout(activeSessions[channelId].autoStopTimeout);
-
-    await say('🏁 *Power Hour Complete!* Generating final results...');
-    await updateLeaderboard(client, channelId, true);
-    await logPowerHourResults(activeSessions[channelId]);
-    
-    delete activeSessions[channelId];
-    
-  } else {
-    await say('Usage: `/powerhour start [duration in minutes]` or `/powerhour stop`\nExample: `/powerhour start 60` for a 60-minute power hour');
-  }
-});
 // Auto-stop power hour after duration
 activeSessions[channelId].autoStopTimeout = setTimeout(async () => {
   await say('🏁 *Power Hour Complete!* Time\'s up! Generating final results...');
   await updateLeaderboard(client, channelId, true);
+  
+  // Log results to Google Sheets
+  await logPowerHourResults(activeSessions[channelId]);
   
   // Clear intervals
   clearInterval(activeSessions[channelId].interval);
@@ -143,7 +123,31 @@ activeSessions[channelId].autoStopTimeout = setTimeout(async () => {
   clearTimeout(activeSessions[channelId].halfwayTimeout);
   
   delete activeSessions[channelId];
-}, duration * 60 * 1000); // Convert minutes to milliseconds
+}, duration * 60 * 1000);
+
+} else if (action === 'stop') {
+  if (!activeSessions[channelId]) {
+    await say("There's no active Power Hour to stop in this channel.");
+    return;
+  }
+  
+  // Clear all intervals and timeouts
+  clearInterval(activeSessions[channelId].interval);
+  clearInterval(activeSessions[channelId].inactivityInterval);
+  clearTimeout(activeSessions[channelId].finalPushTimeout);
+  clearTimeout(activeSessions[channelId].halfwayTimeout);
+  clearTimeout(activeSessions[channelId].autoStopTimeout);
+
+  await say('🏁 *Power Hour Complete!* Generating final results...');
+  await updateLeaderboard(client, channelId, true);
+  await logPowerHourResults(activeSessions[channelId]);
+  
+  delete activeSessions[channelId];
+  
+} else {
+  await say('Usage: `/powerhour start [duration in minutes]` or `/powerhour stop`\nExample: `/powerhour start 60` for a 60-minute power hour');
+}
+});
 
 app.command('/leaderboard', async ({ command, ack, respond }) => {
   await ack();
