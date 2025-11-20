@@ -57,6 +57,7 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
       inactivityInterval: null,
       finalPushTimeout: null,
       halfwayTimeout: null,
+      autoStopTimeout: null,
       startTime: Date.now(),
       duration: duration, // in minutes
       teamDemos: 0,
@@ -117,6 +118,7 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
     clearInterval(activeSessions[channelId].inactivityInterval);
     clearTimeout(activeSessions[channelId].finalPushTimeout);
     clearTimeout(activeSessions[channelId].halfwayTimeout);
+    clearTimeout(activeSessions[channelId].autoStopTimeout);
 
     await say('🏁 *Power Hour Complete!* Generating final results...');
     await updateLeaderboard(client, channelId, true);
@@ -127,6 +129,19 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
     await say('Usage: `/powerhour start [duration in minutes]` or `/powerhour stop`\nExample: `/powerhour start 60` for a 60-minute power hour');
   }
 });
+// Auto-stop power hour after duration
+activeSessions[channelId].autoStopTimeout = setTimeout(async () => {
+  await say('🏁 *Power Hour Complete!* Time\'s up! Generating final results...');
+  await updateLeaderboard(client, channelId, true);
+  
+  // Clear intervals
+  clearInterval(activeSessions[channelId].interval);
+  clearInterval(activeSessions[channelId].inactivityInterval);
+  clearTimeout(activeSessions[channelId].finalPushTimeout);
+  clearTimeout(activeSessions[channelId].halfwayTimeout);
+  
+  delete activeSessions[channelId];
+}, duration * 60 * 1000); // Convert minutes to milliseconds
 
 app.command('/leaderboard', async ({ command, ack, respond }) => {
   await ack();
