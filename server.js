@@ -3,6 +3,7 @@ const { App, ExpressReceiver } = require('@slack/bolt');
 const { getOwners } = require('./owners');
 const cron = require('node-cron');
 const { generateDailyDigest, formatDigestMessage } = require('./digest');
+const { logPowerHourResults } = require('./sheets');
 
 // Create a Bolt Receiver for webhooks and Slack commands
 const receiver = new ExpressReceiver({
@@ -122,6 +123,7 @@ app.command('/powerhour', async ({ command, ack, say, client }) => {
 
     await say('🏁 *Power Hour Complete!* Generating final results...');
     await updateLeaderboard(client, channelId, true);
+    await logPowerHourResults(activeSessions[channelId]);
     
     delete activeSessions[channelId];
     
