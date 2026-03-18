@@ -17,6 +17,9 @@ async function getOwners() {
     ownersCache = {};
     response.data.results.forEach(owner => {
       ownersCache[owner.id] = `${owner.firstName} ${owner.lastName}`;
+if (owner.userId) {
+  ownersCache[owner.userId] = `${owner.firstName} ${owner.lastName}`;
+}
     });
     
     console.log('Loaded', Object.keys(ownersCache).length, 'owners');
