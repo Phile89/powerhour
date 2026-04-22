@@ -2,7 +2,7 @@ require('dotenv').config();
 const { App, ExpressReceiver } = require('@slack/bolt');
 const { getOwners } = require('./owners');
 const cron = require('node-cron');
-const { generateDailyDigest, formatDigestMessage } = require('./digest');
+const { generateDailyDigest, formatDigestMessage, formatDigestBlocks } = require('./digest');
 const { logPowerHourResults } = require('./sheets');
 
 // Create a Bolt Receiver for webhooks and Slack commands
@@ -219,12 +219,13 @@ if (!isNaN(parsed.getTime())) {
   
   try {
     const digest = await generateDailyDigest(owners, true, targetDate);
-    const message = formatDigestMessage(digest);
-    
+    const { blocks, text } = formatDigestBlocks(digest);
+
     await client.chat.postMessage({
       token: process.env.SLACK_BOT_TOKEN,
       channel: channelId,
-      text: message
+      text,
+      blocks
     });
   } catch (error) {
     console.error('Error generating digest:', error);
@@ -233,6 +234,72 @@ if (!isNaN(parsed.getTime())) {
       channel: channelId,
       text: 'Sorry, there was an error generating the summary. Check the logs.'
     });
+  }
+});
+
+// --- DIGEST BUTTON HANDLERS ---
+
+app.action('digest_kudos', async ({ ack, body, action, client }) => {
+  await ack();
+  const topRep = action.value;
+  const clicker = body.user?.id;
+  const channel = body.channel?.id;
+  const hypeLines = [
+    `🎉 Huge shout out to *${topRep}* — crushing it yesterday!`,
+    `🙌 <@${clicker}> says: nice work *${topRep}*! Keep it rolling today.`,
+    `🔥 *${topRep}* set the pace — who's catching them today?`
+  ];
+  const text = hypeLines[Math.floor(Math.random() * hypeLines.length)];
+  await client.chat.postMessage({ channel, text });
+});
+
+app.action('digest_refresh', async ({ ack, body, action, client }) => {
+  await ack();
+  const channel = body.channel?.id;
+  const messageTs = body.message?.ts;
+  const targetDate = action.value ? new Date(action.value + 'T12:00:00') : new Date();
+
+  try {
+    const digest = await generateDailyDigest(owners, true, targetDate);
+    const { blocks, text } = formatDigestBlocks(digest);
+    await client.chat.update({ channel, ts: messageTs, text, blocks });
+  } catch (error) {
+    console.error('Error refreshing digest:', error);
+    await client.chat.postEphemeral({
+      channel,
+      user: body.user.id,
+      text: 'Could not refresh the digest — check the logs.'
+    });
+  }
+});
+
+app.action('digest_breakdown', async ({ ack, body, action, client }) => {
+  await ack();
+  const channel = body.channel?.id;
+  const user = body.user?.id;
+  const targetDate = action.value ? new Date(action.value + 'T12:00:00') : new Date();
+
+  try {
+    const digest = await generateDailyDigest(owners, true, targetDate);
+    let text = `*📋 Full breakdown — ${digest.date}*\n\n`;
+    if (digest.leaderboard.length === 0) {
+      text += '_No activity to break down._';
+    } else {
+      digest.leaderboard.forEach(rep => {
+        const demoPts = rep.demosCompleted * 5 + rep.demosBooked * 3;
+        const callPts = rep.conversations * 2 + rep.connections;
+        text += `*${rep.name}* — ${rep.score} pts\n`;
+        text += `   • Demos: ${rep.demosCompleted} completed + ${rep.demosBooked} booked = ${demoPts} pts\n`;
+        text += `   • Calls: ${rep.conversations} convos + ${rep.connections} connections = ${callPts} pts\n`;
+      });
+      if (digest.metrics.longestCall) {
+        text += `\n🏅 Longest call: *${digest.metrics.longestCall.duration} mins* — ${digest.metrics.longestCall.user}`;
+      }
+    }
+    await client.chat.postEphemeral({ channel, user, text });
+  } catch (error) {
+    console.error('Error building breakdown:', error);
+    await client.chat.postEphemeral({ channel, user, text: 'Could not build breakdown — check the logs.' });
   }
 });
 
@@ -652,36 +719,37 @@ async function postMessageWithGif(channelId, text, gifUrl) {
         });
     } catch (error) { console.error('Error posting GIF message:', error); }
 }
-// Schedule daily digest for 6pm PT (18:00)
-// Cron runs in UTC, so we need to adjust for PT
-// PT is UTC-8 (PST) or UTC-7 (PDT)
-// 6pm PT = 2am UTC (during PDT) or 3am UTC (during PST)
-// Using 2am UTC to match PDT (covers most of the year)
-cron.schedule('0 18 * * 1-5', async () => {
+// Schedule daily digest for 9am Dublin, Tue–Sat — covers the previous weekday
+// (so Ian in NZ has fully wrapped his day before the digest runs)
+cron.schedule('0 9 * * 2-6', async () => {
   console.log('Running scheduled daily digest...');
-  
+
   const digestChannelId = process.env.DIGEST_CHANNEL_ID;
   if (!digestChannelId) {
     console.error('DIGEST_CHANNEL_ID not set in .env');
     return;
   }
-  
+
+  const targetDate = new Date();
+  targetDate.setDate(targetDate.getDate() - 1);
+
   try {
-    const digest = await generateDailyDigest(owners, true);
-    const message = formatDigestMessage(digest);
-    
+    const digest = await generateDailyDigest(owners, true, targetDate);
+    const { blocks, text } = formatDigestBlocks(digest);
+
     await app.client.chat.postMessage({
       token: process.env.SLACK_BOT_TOKEN,
       channel: digestChannelId,
-      text: message
+      text,
+      blocks
     });
-    
+
     console.log('Daily digest posted successfully');
   } catch (error) {
     console.error('Error posting scheduled digest:', error);
   }
 }, {
-  timezone: "America/Los_Angeles"
+  timezone: "Europe/Dublin"
 });
 
 // Start the app

@@ -263,27 +263,49 @@ function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
   return leaderboard;
 }
 
+// Filter records to only those owned by allowlisted reps (by owner name)
+function filterByAllowedReps(records, owners, allowedNames) {
+  if (!allowedNames || allowedNames.length === 0) return records;
+  const lower = allowedNames.map(n => n.toLowerCase());
+  return records.filter(r => {
+    const name = owners[r.properties.hubspot_owner_id];
+    if (!name) return false;
+    return lower.some(a => name.toLowerCase().includes(a));
+  });
+}
+
 // Generate the full daily digest
 async function generateDailyDigest(owners, includeComparison = true, targetDate = new Date()) {
   const today = targetDate;
   const lastWeek = new Date(today);
   lastWeek.setDate(lastWeek.getDate() - 7);
-  
+
+  // Allowlist of reps to include (comma-separated first names/substrings in DIGEST_REPS)
+  const allowedReps = (process.env.DIGEST_REPS || 'Jon Santos,Ian Jackson,Massimiliano Putzolu')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
   // Fetch today's data
-  const [demosBookedToday, demosCompletedToday, callsToday] = await Promise.all([
+  let [demosBookedToday, demosCompletedToday, callsToday] = await Promise.all([
     getDemosBookedToday(today),
     getDemosCompletedToday(today),
     getCallsForDay(today)
   ]);
-  
+
+  demosBookedToday = filterByAllowedReps(demosBookedToday, owners, allowedReps);
+  demosCompletedToday = filterByAllowedReps(demosCompletedToday, owners, allowedReps);
+  callsToday = filterByAllowedReps(callsToday, owners, allowedReps);
+
   // Fetch last week's data for comparison
   let comparison = null;
   if (includeComparison) {
-    const [demosBookedLastWeek, demosCompletedLastWeek, callsLastWeek] = await Promise.all([
+    let [demosBookedLastWeek, demosCompletedLastWeek, callsLastWeek] = await Promise.all([
       getDemosBookedToday(lastWeek),
       getDemosCompletedToday(lastWeek),
       getCallsForDay(lastWeek)
     ]);
+    demosBookedLastWeek = filterByAllowedReps(demosBookedLastWeek, owners, allowedReps);
+    demosCompletedLastWeek = filterByAllowedReps(demosCompletedLastWeek, owners, allowedReps);
+    callsLastWeek = filterByAllowedReps(callsLastWeek, owners, allowedReps);
     
     comparison = {
       demosBooked: demosBookedToday.length - demosBookedLastWeek.length,
@@ -302,6 +324,7 @@ async function generateDailyDigest(owners, includeComparison = true, targetDate 
   
   return {
     date: today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' }),
+    targetDateISO: today.toISOString().slice(0, 10),
     totals: {
       demosBooked: demosBookedToday.length,
       demosCompleted: demosCompletedToday.length,
@@ -373,7 +396,94 @@ function formatDigestMessage(digest) {
   return message;
 }
 
+// Format digest as Slack Block Kit with interactive buttons
+function formatDigestBlocks(digest) {
+  const { date, totals, metrics, leaderboard, comparison } = digest;
+  const topRep = leaderboard[0]?.name || null;
+  const targetDateISO = digest.targetDateISO || '';
+
+  const comparisonLine = (key, label) => {
+    if (!comparison || !comparison[key]) return '';
+    const arrow = comparison[key] > 0 ? '📈' : '📉';
+    const sign = comparison[key] > 0 ? '+' : '';
+    return ` ${arrow} ${sign}${comparison[key]} vs last week`;
+  };
+
+  const metricsText =
+    `*📈 KEY METRICS*\n` +
+    `• Demos Booked: *${totals.demosBooked}*${comparisonLine('demosBooked')}\n` +
+    `• Demos Completed: *${totals.demosCompleted}*${comparisonLine('demosCompleted')}\n` +
+    `• Total Calls: *${totals.calls}*${comparisonLine('calls')}\n` +
+    `• Time on Phone: *${totals.timeOnPhone} mins*\n` +
+    `• Conversion Rate: *${totals.conversionRate}%*`;
+
+  let insightsText = '';
+  if (metrics.averageDuration > 0) {
+    insightsText = `*💡 INSIGHTS*\n• Average Call: *${metrics.averageDuration} mins*`;
+    if (metrics.longestCall) {
+      insightsText += `\n• Longest Call: *${metrics.longestCall.duration} mins* by ${metrics.longestCall.user} with ${metrics.longestCall.contact}`;
+    }
+    if (metrics.mostActiveHour) {
+      insightsText += `\n• Most Active Hour: *${metrics.mostActiveHour.formatted}* (${metrics.mostActiveHour.count} calls)`;
+    }
+  }
+
+  let leaderboardText = `*🏆 DAILY LEADERBOARD*\n_5 pts demo completed • 3 pts demo booked • 2 pts conversation • 1 pt connection_\n\n`;
+  if (leaderboard.length === 0) {
+    leaderboardText += `_No activity today_`;
+  } else {
+    leaderboard.forEach((rep, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `   ${i + 1}.`;
+      leaderboardText += `${medal} *${rep.name}* - ${rep.score} pts\n`;
+      leaderboardText += `        ${rep.conversations} convos • ${rep.connections} connections • ${rep.demosBooked} booked • ${rep.demosCompleted} completed\n`;
+    });
+  }
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: `📊 Daily Sales Digest — ${date}` } },
+    { type: 'section', text: { type: 'mrkdwn', text: metricsText } }
+  ];
+
+  if (insightsText) {
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: insightsText } });
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: leaderboardText } });
+
+  const actionElements = [];
+  if (topRep) {
+    actionElements.push({
+      type: 'button',
+      action_id: 'digest_kudos',
+      text: { type: 'plain_text', text: `👏 Big up ${topRep}` },
+      value: topRep,
+      style: 'primary'
+    });
+  }
+  actionElements.push({
+    type: 'button',
+    action_id: 'digest_breakdown',
+    text: { type: 'plain_text', text: '📊 Full breakdown' },
+    value: targetDateISO
+  });
+  actionElements.push({
+    type: 'button',
+    action_id: 'digest_refresh',
+    text: { type: 'plain_text', text: '🔄 Refresh' },
+    value: targetDateISO
+  });
+
+  blocks.push({ type: 'actions', elements: actionElements });
+
+  const fallbackText = `Daily Sales Digest — ${date}: ${totals.demosBooked} demos booked, ${totals.calls} calls`;
+
+  return { blocks, text: fallbackText };
+}
+
 module.exports = {
   generateDailyDigest,
-  formatDigestMessage
+  formatDigestMessage,
+  formatDigestBlocks
 };
