@@ -214,7 +214,7 @@ function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
     const ownerName = owners[ownerId] || `Owner ${ownerId}`;
     
     if (!repStats[ownerName]) {
-      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, score: 0 };
+      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, minutesOnPhone: 0, score: 0 };
     }
     repStats[ownerName].demosBooked += 1;
   });
@@ -225,7 +225,7 @@ function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
     const ownerName = owners[ownerId] || `Owner ${ownerId}`;
     
     if (!repStats[ownerName]) {
-      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, score: 0 };
+      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, minutesOnPhone: 0, score: 0 };
     }
     repStats[ownerName].demosCompleted += 1;
   });
@@ -236,18 +236,25 @@ function buildLeaderboard(demosBooked, demosCompleted, calls, owners) {
     const ownerName = owners[ownerId] || `Owner ${ownerId}`;
     
     if (!repStats[ownerName]) {
-      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, score: 0 };
+      repStats[ownerName] = { demosBooked: 0, demosCompleted: 0, conversations: 0, connections: 0, minutesOnPhone: 0, score: 0 };
     }
     
     // HubSpot duration is in milliseconds
     const durationMs = parseInt(call.properties.hs_call_duration) || 0;
     const durationSeconds = durationMs / 1000;
-    
+
+    repStats[ownerName].minutesOnPhone += durationMs;
+
     if (durationSeconds >= 120) {
       repStats[ownerName].conversations += 1; // 2 points
     } else {
       repStats[ownerName].connections += 1; // 1 point
     }
+  });
+
+  // Convert accumulated milliseconds to whole minutes
+  Object.values(repStats).forEach(stats => {
+    stats.minutesOnPhone = Math.round(stats.minutesOnPhone / 60000);
   });
   
   // Calculate scores: 5pts per demo completed, 3pts per demo booked, 2pts per conversation, 1pt per connection
@@ -281,7 +288,7 @@ async function generateDailyDigest(owners, includeComparison = true, targetDate 
   lastWeek.setDate(lastWeek.getDate() - 7);
 
   // Allowlist of reps to include (comma-separated first names/substrings in DIGEST_REPS)
-  const allowedReps = (process.env.DIGEST_REPS || 'Jon Santos,Ian Jackson,Massimiliano Putzolu')
+  const allowedReps = (process.env.DIGEST_REPS || 'Jon Santos,Ian Jackson,Massimiliano Putzolu,Cole Seaton')
     .split(',').map(s => s.trim()).filter(Boolean);
 
   // Fetch today's data
@@ -389,7 +396,7 @@ function formatDigestMessage(digest) {
     leaderboard.forEach((rep, index) => {
       const medal = index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `   ${index + 1}.`;
       message += `> ${medal} *${rep.name}* - ${rep.score} pts\n`;
-      message += `>       ${rep.conversations} conversations • ${rep.connections} connections • ${rep.demosBooked} demos booked • ${rep.demosCompleted} demos completed\n`;
+      message += `>       ${rep.conversations} conversations • ${rep.connections} connections • ${rep.demosBooked} demos booked • ${rep.demosCompleted} demos completed • ${rep.minutesOnPhone} mins on phone\n`;
     });
   }
   
@@ -435,7 +442,7 @@ function formatDigestBlocks(digest) {
     leaderboard.forEach((rep, i) => {
       const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `   ${i + 1}.`;
       leaderboardText += `${medal} *${rep.name}* - ${rep.score} pts\n`;
-      leaderboardText += `        ${rep.conversations} convos • ${rep.connections} connections • ${rep.demosBooked} booked • ${rep.demosCompleted} completed\n`;
+      leaderboardText += `        ${rep.conversations} convos • ${rep.connections} connections • ${rep.demosBooked} booked • ${rep.demosCompleted} completed • ${rep.minutesOnPhone} mins on phone\n`;
     });
   }
 
