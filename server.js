@@ -721,6 +721,8 @@ async function postMessageWithGif(channelId, text, gifUrl) {
 }
 // Schedule daily digest for 9am Dublin, Tue–Sat — covers the previous weekday
 // (so Ian in NZ has fully wrapped his day before the digest runs)
+// DISABLED — remove the comment markers around this block to turn it back on
+/*
 cron.schedule('0 9 * * 2-6', async () => {
   console.log('Running scheduled daily digest...');
 
@@ -751,6 +753,7 @@ cron.schedule('0 9 * * 2-6', async () => {
 }, {
   timezone: "Europe/Dublin"
 });
+*/
 
 // Start the app
 (async () => {
